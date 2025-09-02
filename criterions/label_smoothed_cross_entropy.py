@@ -299,14 +299,15 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         index = torch.zeros_like(target).to(target.device)
         index[:, :2, :] = 1  # the first two tokens are bbox points; 1 indicates the location of detection results
 
-        target = target[token_type == 0]
-        index = index[token_type == 0]
-        regression_output = net_output[1].squeeze(-1)
-        regression_output = regression_output[token_type == 0]
+        dist = net_output[1]
+        log_prob = dist.log_prob(target.clamp(1e-6, 1 - 1e-6))
 
-        loss_reg = F.l1_loss(target[index == 1], regression_output[index == 1]) * det_weight
+        log_prob = log_prob[token_type == 0]
+        index = index[token_type == 0]
+
+        loss_reg = -log_prob[index == 1].mean() * det_weight
         if (index == 0).any():
-            loss_reg += F.l1_loss(target[index == 0], regression_output[index == 0])
+            loss_reg += -log_prob[index == 0].mean()
 
         loss = loss_reg + loss_cls
         if update_num % 5000 == 1:

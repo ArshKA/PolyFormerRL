@@ -228,7 +228,7 @@ class RefcocoTask(BaseTask):
 
                 cls_output = net_output[0]
                 cls_type = torch.argmax(cls_output, 2)
-                reg_output = net_output[1]
+                reg_output = net_output[1].mean
                 for j in range(b):
                     if unfinish_flag[j] == 1:  # prediction is not finished
                         cls_j = cls_type[j, i].item()
