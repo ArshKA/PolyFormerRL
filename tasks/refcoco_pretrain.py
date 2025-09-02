@@ -214,9 +214,9 @@ class RefcocoPretrainTask(BaseTask):
                     src_lengths=sample['net_input']['src_lengths'],
                     return_all_hiddens=False
                 )
-                net_output = net_output[1]
+                reg_output = net_output[1].mean
                 for j in range(b):
-                    output_j_x, output_j_y = net_output[j, i].cpu().numpy()
+                    output_j_x, output_j_y = reg_output[j, i].cpu().numpy()
                     gen_out[j].extend([output_j_x, output_j_y])
 
                     output_j_x = output_j_x * (n_bins - 1)

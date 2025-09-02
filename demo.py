@@ -289,7 +289,7 @@ def visual_grounding(image, text):
 
             cls_output = net_output[0]
             cls_type = torch.argmax(cls_output, 2)
-            reg_output = net_output[1].squeeze(-1)
+            reg_output = net_output[1].mean
             attn = net_output[2]['attn']
             attn_arrays = [att.detach().cpu().numpy() for att in attn]
             attn_arrays = np.concatenate(attn_arrays, 0)

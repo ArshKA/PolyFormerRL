@@ -37,6 +37,7 @@ from fairseq.modules import (
 from fairseq.modules.checkpoint_activations import checkpoint_wrapper
 from fairseq.modules.quant_noise import quant_noise as apply_quant_noise_
 from torch import Tensor
+from torch.distributions import Beta, Independent
 
 from .unify_transformer_layer import TransformerEncoderLayer, TransformerDecoderLayer
 from .swin import SwinTransformer
@@ -1049,7 +1050,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.entangle_position_embedding = args.entangle_position_embedding
 
     def build_output_projection(self, args, dictionary, embed_tokens):
-        self.reg_head = MLP(self.output_embed_dim, self.output_embed_dim, 2, 3)
+        # output four parameters -> alpha_x, beta_x, alpha_y, beta_y
+        self.reg_head = MLP(self.output_embed_dim, self.output_embed_dim, 4, 3)
         nn.init.constant_(self.reg_head.layers[-1].weight.data, 0)
         nn.init.constant_(self.reg_head.layers[-1].bias.data, 0)
 
@@ -1399,7 +1401,11 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         """Project features to the vocabulary size."""
         if self.adaptive_softmax is None:
             # project back to size of vocabulary
-            return self.cls_head(features), F.sigmoid(self.reg_head(features))
+            cls_logits = self.cls_head(features)
+            params = F.softplus(self.reg_head(features)) + 1e-4
+            alpha, beta_param = params[..., :2], params[..., 2:]
+            reg_dist = Independent(Beta(alpha, beta_param), 1)
+            return cls_logits, reg_dist
         else:
             return features
 
