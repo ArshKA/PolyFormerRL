@@ -1,4 +1,7 @@
-from refer.refer import REFER
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'refer'))
+from refer import REFER
 import numpy as np
 from PIL import Image
 import random
@@ -15,7 +18,7 @@ max_length = 400
 data_root = './refer/data'
 datasets = ['refcoco', 'refcoco+', 'refcocog']
 
-image_dir = './datasets/images/mscoco/train2014'
+image_dir = '/data0/arshkon/checkpoints/polyform_rl/datasets/images/mscoco/train2014'
 val_test_files = pickle.load(open("data/val_test_files.p", "rb"))
 
 combined_train_data = []
@@ -31,7 +34,7 @@ for dataset in datasets:
         splits = ['train', 'val']
         splitBy = 'umd'
 
-    save_dir = f'datasets/finetune/{dataset}'
+    save_dir = f'/data0/arshkon/checkpoints/polyform_rl/datasets/finetune/{dataset}'
     os.makedirs(save_dir, exist_ok=True)
     for split in splits:
         num_pts = []
@@ -112,7 +115,7 @@ for dataset in datasets:
         writer.close()
 
 random.shuffle(combined_train_data)
-file_name = os.path.join("datasets/finetune/refcoco+g_train_shuffled.tsv")
+file_name = os.path.join("/data0/arshkon/checkpoints/polyform_rl/datasets/finetune", "refcoco+g_train_shuffled.tsv")
 print("creating ", file_name)
 writer = open(file_name, 'w')
 writer.writelines(combined_train_data)

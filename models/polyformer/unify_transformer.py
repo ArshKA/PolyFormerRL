@@ -529,7 +529,7 @@ class TransformerEncoder(FairseqEncoder):
         self.register_buffer("token_rp_bucket", token_rp_bucket)
         self.register_buffer("image_rp_bucket", image_rp_bucket)
         self.entangle_position_embedding = args.entangle_position_embedding
-        self.bert = BertModel.from_pretrained("bert-base-uncased")
+        self.bert = BertModel.from_pretrained("/data0/arshkon/checkpoints/polyform_rl/bert-base-uncased")
 
     def train(self, mode=True):
         super(TransformerEncoder, self).train(mode)

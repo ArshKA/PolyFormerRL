@@ -15,7 +15,7 @@ import os
 import math
 import numpy as np
 import torch
-from fairseq import metrics
+from fairseq.logging import metrics
 from fairseq.tasks import register_task
 
 from tasks.base_task import BaseTask, BaseConfig, load_bert_pretrained_weights

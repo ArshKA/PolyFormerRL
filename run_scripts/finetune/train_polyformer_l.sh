@@ -7,18 +7,18 @@ export MASTER_PORT=6061
 det_weight=0.1
 cls_weight=0.0005
 num_bins=64
-log_dir=./polyformer_l_logs
-save_dir=./polyformer_l_checkpoints
+log_dir=/data0/arshkon/checkpoints/polyform_rl/polyformer_l_logs
+save_dir=/data0/arshkon/checkpoints/polyform_rl/polyformer_l_checkpoints
 mkdir -p $log_dir $save_dir
 
 bpe_dir=../../utils/BPE
 user_dir=../../polyformer_module
 
-data_dir=../../datasets/finetune
+data_dir=/data0/arshkon/checkpoints/polyform_rl/datasets/finetune
 data=${data_dir}/refcoco+g_train_shuffled.tsv,${data_dir}/refcoco/refcoco_val.tsv
 selected_cols=0,5,6,2,4,3,7
-restore_file=../../weights/polyformer_l_pretrain.pt
-
+restore_file=/data0/arshkon/checkpoints/polyform_rl/polyformer_l_pretrain.pt
+train_tsv=${data_dir}/refcoco+g_train_shuffled.tsv
 
 task=refcoco
 arch=polyformer_l
@@ -27,7 +27,7 @@ label_smoothing=0.1
 lr=3e-5
 max_epoch=5
 warmup_ratio=0.06
-batch_size=8
+batch_size=4
 update_freq=8
 resnet_drop_path_rate=0.0
 encoder_drop_path_rate=0.1
@@ -38,6 +38,8 @@ max_src_length=80
 max_tgt_length=420
 
 patch_image_size=512
+
+WORLD_SIZE=8
 
 for max_epoch in 100; do
   echo "max_epoch "${max_epoch}
@@ -50,7 +52,19 @@ for max_epoch in 100; do
       save_path=${save_dir}/${max_epoch}"_"${lr}"_"${patch_image_size}
       mkdir -p $save_path
 
-      CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m torch.distributed.launch --nproc_per_node=8 --master_port=${MASTER_PORT} ../../train.py \
+      # compute total updates and warmup-updates from warmup_ratio
+      n_train=$(wc -l < "${train_tsv}")
+      effective_per_update=$(( batch_size * update_freq * WORLD_SIZE ))
+      updates_per_epoch=$(( (n_train + effective_per_update - 1) / effective_per_update ))
+      total_num_update=$(( max_epoch * updates_per_epoch ))
+      warmup_updates=$(python - <<PY
+ratio = float("${warmup_ratio}")
+total = int(${total_num_update})
+print(int(ratio * total))
+PY
+)
+
+      CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=${WORLD_SIZE} --master_port=${MASTER_PORT} --standalone ../../train.py \
           $data \
           --selected-cols=${selected_cols} \
           --bpe-dir=${bpe_dir} \
@@ -78,7 +92,7 @@ for max_epoch in 100; do
           --attention-dropout=${attention_dropout} \
           --weight-decay=0.01 --optimizer=adam --adam-betas="(0.9,0.999)" --adam-eps=1e-08 --clip-norm=1.0 \
           --lr-scheduler=polynomial_decay --lr=${lr} \
-          --max-epoch=${max_epoch} --warmup-ratio=${warmup_ratio} \
+          --max-epoch=${max_epoch} --total-num-update=${total_num_update} --warmup-updates=${warmup_updates} \
           --log-format=simple --log-interval=10 \
           --fixed-validation-seed=7 \
           --no-epoch-checkpoints --keep-best-checkpoints=1 \

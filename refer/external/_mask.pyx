@@ -1,6 +1,7 @@
 # distutils: language = c
 # distutils: sources = external/maskApi.c
 
+# cython: language_level=3
 #**************************************************************************
 # Microsoft COCO Toolbox.      version 2.0
 # Data, paper, and tutorials available at:  http://mscoco.org/
@@ -22,7 +23,8 @@ np.import_array()
 # import numpy C function
 # we use PyArray_ENABLEFLAGS to make Numpy ndarray responsible to memoery management
 cdef extern from "numpy/arrayobject.h":
-    void PyArray_ENABLEFLAGS(np.ndarray arr, int flags)
+    void PyArray_ENABLEFLAGS(object arr, int flags)
+    object PyArray_SimpleNewFromData(int nd, np.npy_intp* dims, int typenum, void* data)
 
 # Declare the prototype of the C functions in MaskApi.h
 cdef extern from "maskApi.h":
@@ -119,7 +121,7 @@ def _frString(rleObjs):
     cdef bytes py_string
     cdef char* c_string
     for i, obj in enumerate(rleObjs):
-        py_string = str(obj['counts'])
+        py_string = obj['counts'].encode('ascii')
         c_string = py_string
         rleFrString( <RLE*> &Rs._R[i], <char*> c_string, obj['size'][0], obj['size'][1] )
     return Rs
@@ -154,8 +156,7 @@ def area(rleObjs):
     rleArea(Rs._R, Rs._n, _a)
     cdef np.npy_intp shape[1]
     shape[0] = <np.npy_intp> Rs._n
-    a = np.array((Rs._n, ), dtype=np.uint8)
-    a = np.PyArray_SimpleNewFromData(1, shape, np.NPY_UINT32, _a)
+    cdef np.ndarray a = np.PyArray_SimpleNewFromData(1, shape, np.NPY_UINT32, _a)
     PyArray_ENABLEFLAGS(a, np.NPY_OWNDATA)
     return a
 
@@ -223,9 +224,8 @@ def iou( dt, gt, pyiscrowd ):
     else:
         raise Exception('input data type not allowed.')
     _iou = <double*> malloc(m*n* sizeof(double))
-    iou = np.zeros((m*n, ), dtype=np.double)
     shape[0] = <np.npy_intp> m*n
-    iou = np.PyArray_SimpleNewFromData(1, shape, np.NPY_DOUBLE, _iou)
+    cdef np.ndarray iou = np.PyArray_SimpleNewFromData(1, shape, np.NPY_DOUBLE, _iou)
     PyArray_ENABLEFLAGS(iou, np.NPY_OWNDATA)
     _iouFun(dt, gt, iscrowd, m, n, iou)
     return iou.reshape((m,n), order='F')
@@ -237,8 +237,7 @@ def toBbox( rleObjs ):
     rleToBbox( <const RLE*> Rs._R, _bb, n )
     cdef np.npy_intp shape[1]
     shape[0] = <np.npy_intp> 4*n
-    bb = np.array((1,4*n), dtype=np.double)
-    bb = np.PyArray_SimpleNewFromData(1, shape, np.NPY_DOUBLE, _bb).reshape((n, 4))
+    cdef np.ndarray bb = np.PyArray_SimpleNewFromData(1, shape, np.NPY_DOUBLE, _bb).reshape((n, 4))
     PyArray_ENABLEFLAGS(bb, np.NPY_OWNDATA)
     return bb
 
@@ -255,7 +254,7 @@ def frPoly( poly, siz h, siz w ):
     Rs = RLEs(n)
     for i, p in enumerate(poly):
         np_poly = np.array(p, dtype=np.double, order='F')
-        rleFrPoly( <RLE*>&Rs._R[i], <const double*> np_poly.data, len(np_poly)/2, h, w )
+        rleFrPoly( <RLE*>&Rs._R[i], <const double*> np_poly.data, len(np_poly)//2, h, w )
     objs = _toString(Rs)
     return objs
 

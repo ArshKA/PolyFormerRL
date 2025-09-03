@@ -501,7 +501,7 @@ class Trainer(object):
 
             # load model parameters
             try:
-                if self.cfg.checkpoint.use_ema_weights_to_init_param and "extra_state" in state and "ema" in state["extra_state"]:
+                if self.cfg.checkpoint.get("use_ema_weights_to_init_param", False) and "extra_state" in state and "ema" in state["extra_state"]:
                     logger.info("use_ema_weights_to_init_param = True, will use EMA weights in the ckpt to init the model param...")
                     ema_state_dict = state["extra_state"]["ema_fp32_params"] if "ema_fp32_params" in state["extra_state"] else state["extra_state"]["ema"]
                     self.model.load_state_dict(
@@ -1105,7 +1105,10 @@ class Trainer(object):
         return self.lr_step_update()
 
     def lr_reinit(self, total_updates, num_updates):
-        self.lr_scheduler.reinit(total_updates, num_updates)
+        if hasattr(self.lr_scheduler, 'reinit'):
+            self.lr_scheduler.reinit(total_updates, num_updates)
+        else:
+            logger.warning(f"LR scheduler {type(self.lr_scheduler).__name__} does not have a 'reinit' method. Skipping reinit.")
 
     def lr_step(self, epoch, val_loss=None):
         """Adjust the learning rate at the end of the epoch."""
