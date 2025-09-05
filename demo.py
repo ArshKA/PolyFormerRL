@@ -289,7 +289,7 @@ def visual_grounding(image, text):
 
             cls_output = net_output[0]
             cls_type = torch.argmax(cls_output, 2)
-            reg_output = net_output[1].squeeze(-1)
+            w, mu, sigma = net_output[1]
             attn = net_output[2]['attn']
             attn_arrays = [att.detach().cpu().numpy() for att in attn]
             attn_arrays = np.concatenate(attn_arrays, 0)
@@ -303,7 +303,8 @@ def visual_grounding(image, text):
                 if unfinish_flag[j] == 1:  # prediction is not finished
                     cls_j = cls_type[j, i].item()
                     if cls_j == 0 or (cls_j == 2 and i < min_len):  # 0 for coordinate tokens; 2 for eos
-                        output_j_x, output_j_y = reg_output[j, i].cpu().numpy()
+                        comp = w[j, i].argmax().item()
+                        output_j_x, output_j_y = mu[j, i, comp].cpu().numpy()
                         output_j_x = min(output_j_x, 1)
                         output_j_y = min(output_j_y, 1)
 

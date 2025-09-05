@@ -934,6 +934,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
     ):
         self.args = args
         super().__init__(dictionary)
+        self.num_mixtures = getattr(args, "num_mixtures", 1)
         self.register_buffer("version", torch.Tensor([3]))
         self._future_mask = torch.empty(0)
 
@@ -1049,7 +1050,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.entangle_position_embedding = args.entangle_position_embedding
 
     def build_output_projection(self, args, dictionary, embed_tokens):
-        self.reg_head = MLP(self.output_embed_dim, self.output_embed_dim, 2, 3)
+        out_dim = self.num_mixtures * 5
+        self.reg_head = MLP(self.output_embed_dim, self.output_embed_dim, out_dim, 3)
         nn.init.constant_(self.reg_head.layers[-1].weight.data, 0)
         nn.init.constant_(self.reg_head.layers[-1].bias.data, 0)
 
@@ -1398,8 +1400,14 @@ class TransformerDecoder(FairseqIncrementalDecoder):
     def output_layer(self, features):
         """Project features to the vocabulary size."""
         if self.adaptive_softmax is None:
-            # project back to size of vocabulary
-            return self.cls_head(features), F.sigmoid(self.reg_head(features))
+            params = self.reg_head(features)
+            K = self.num_mixtures
+            w, mu, log_sigma = params.split([K, 2 * K, 2 * K], dim=-1)
+            w = F.softmax(w, dim=-1)
+            B, T, _ = features.size()
+            mu = torch.sigmoid(mu).view(B, T, K, 2)
+            sigma = F.softplus(log_sigma).view(B, T, K, 2) + 1e-6
+            return self.cls_head(features), (w, mu, sigma)
         else:
             return features
 

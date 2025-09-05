@@ -59,6 +59,13 @@ class RefcocoPretrainConfig(BaseConfig):
         },
     )
 
+    num_mixtures: int = field(
+        default=1, metadata={"help": "number of Gaussian components"}
+    )
+    sample_temperature: float = field(
+        default=1.0, metadata={"help": "temperature for GMM sampling"}
+    )
+
 
 @register_task("refcoco_pretrain", dataclass=RefcocoPretrainConfig)
 class RefcocoPretrainTask(BaseTask):
@@ -214,9 +221,10 @@ class RefcocoPretrainTask(BaseTask):
                     src_lengths=sample['net_input']['src_lengths'],
                     return_all_hiddens=False
                 )
-                net_output = net_output[1]
+                w, mu, sigma = net_output[1]
                 for j in range(b):
-                    output_j_x, output_j_y = net_output[j, i].cpu().numpy()
+                    comp = w[j, i].argmax().item()
+                    output_j_x, output_j_y = mu[j, i, comp].cpu().numpy()
                     gen_out[j].extend([output_j_x, output_j_y])
 
                     output_j_x = output_j_x * (n_bins - 1)

@@ -107,7 +107,7 @@ class PolyFormerModel(TransformerModel):
             return_all_hiddens=return_all_hiddens,
             sample_patch_num=sample_patch_num
         )
-        x_cls, x_reg, extra = self.decoder(
+        x_cls, gmm_params, extra = self.decoder(
             prev_output_tokens_11,
             prev_output_tokens_12,
             prev_output_tokens_21,
@@ -124,7 +124,7 @@ class PolyFormerModel(TransformerModel):
             src_lengths=src_lengths,
             return_all_hiddens=return_all_hiddens,
         )
-        return x_cls, x_reg, extra
+        return x_cls, gmm_params, extra
 
     def upgrade_state_dict_named(self, state_dict, name):
         pass
@@ -181,6 +181,7 @@ def polyformer_l_architecture(args):
     args.out_index = getattr(args, "out_index", 3)
     args.token_bucket_size = getattr(args, "token_bucket_size", 256)
     args.image_bucket_size = getattr(args, "image_bucket_size", 42)
+    args.num_mixtures = getattr(args, "num_mixtures", 1)
 
     args.freeze_encoder_embedding = getattr(args, "freeze_encoder_embedding", False)
     args.freeze_decoder_embedding = getattr(args, "freeze_decoder_embedding", False)

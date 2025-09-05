@@ -15,6 +15,7 @@ import os
 import math
 import numpy as np
 import torch
+import torch.nn.functional as F
 from fairseq.logging import metrics
 from fairseq.tasks import register_task
 
@@ -68,6 +69,13 @@ class RefcocoConfig(BaseConfig):
 
     max_inference_len: int = field(
         default=210, metadata={"help": "maximum number of inference steps"}
+    )
+
+    num_mixtures: int = field(
+        default=1, metadata={"help": "number of Gaussian components"}
+    )
+    sample_temperature: float = field(
+        default=1.0, metadata={"help": "temperature for GMM sampling"}
     )
 
 
@@ -232,14 +240,19 @@ class RefcocoTask(BaseTask):
 
                 cls_output = net_output[0]
                 cls_type = torch.argmax(cls_output, 2)
-                reg_output = net_output[1]
+                w, mu, sigma = net_output[1]
+                temp = self.cfg.sample_temperature
                 for j in range(b):
                     if unfinish_flag[j] == 1:  # prediction is not finished
                         cls_j = cls_type[j, i].item()
                         if cls_j == COO or (cls_j == EOS and i < min_len):
-                            output_j_x, output_j_y = reg_output[j, i].cpu().numpy()
-                            output_j_x = min(output_j_x, 1)
-                            output_j_y = min(output_j_y, 1)
+                            w_j = w[j, i]
+                            if temp != 1.0:
+                                w_j = F.softmax(torch.log(w_j + 1e-9) / temp, dim=-1)
+                            comp = torch.multinomial(w_j, 1).item()
+                            sample = torch.normal(mu[j, i, comp], sigma[j, i, comp] * temp)
+                            sample = sample.clamp(0, 1)
+                            output_j_x, output_j_y = sample.cpu().numpy()
 
                             gen_out[j].extend([output_j_x, output_j_y])
 
