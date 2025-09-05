@@ -211,6 +211,7 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
                 "sample_size": 1,
                 "sample_size_v1": sample_size_v1,
                 "sample_size_v2": sample_size_v2,
+                "gt_prob": (logging_output_v1.get("gt_prob", 0) + logging_output_v2.get("gt_prob", 0)) / 2,
             }
             return loss, sample_size, logging_output
 
@@ -218,8 +219,10 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             construct_rdrop_sample(sample)
 
         net_output = model(**sample["net_input"])
-        loss, nll_loss, ntokens = self.compute_loss(model, net_output, sample, update_num, det_weight=self.det_weight,
-                                                    cls_weight=self.cls_weight, reduce=reduce)
+        loss, nll_loss, ntokens, gt_prob = self.compute_loss(
+            model, net_output, sample, update_num, det_weight=self.det_weight,
+            cls_weight=self.cls_weight, reduce=reduce
+        )
         sample_size = (
             sample["target"].size(0)
         )
@@ -229,6 +232,7 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             "ntokens": sample["ntokens"],
             "nsentences": sample["nsentences"],
             "sample_size": sample_size,
+            "gt_prob": gt_prob.data,
         }
         if self.report_accuracy:
             n_correct, total = self.compute_accuracy(model, net_output, sample)
@@ -292,27 +296,33 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         )
         loss_cls = cls_weight * loss_cls/b
 
-        # compute regression loss
+        # compute regression loss via GMM likelihood
         token_type = sample["token_type"]
-        token_type = torch.stack([token_type, token_type], -1)
-        target = sample["target"]
-        index = torch.zeros_like(target).to(target.device)
-        index[:, :2, :] = 1  # the first two tokens are bbox points; 1 indicates the location of detection results
+        target_full = sample["target"]
+        index = torch.zeros_like(target_full[:, :, 0]).to(target_full.device)
+        index[:, :2] = 1  # first two tokens are detection
+        mask = token_type == 0
+        target = target_full[mask]
+        det_mask = index[mask] > 0
+        w, mu, sigma = net_output[1]
+        w = w[mask]
+        mu = mu[mask]
+        sigma = sigma[mask]
 
-        target = target[token_type == 0]
-        index = index[token_type == 0]
-        regression_output = net_output[1].squeeze(-1)
-        regression_output = regression_output[token_type == 0]
-
-        loss_reg = F.l1_loss(target[index == 1], regression_output[index == 1]) * det_weight
-        if (index == 0).any():
-            loss_reg += F.l1_loss(target[index == 0], regression_output[index == 0])
+        diff = (target.unsqueeze(1) - mu) / sigma
+        log_gauss = -0.5 * diff.pow(2).sum(-1) - torch.log(2 * math.pi * sigma.prod(-1))
+        log_prob = torch.log(w + 1e-9) + log_gauss
+        nll = -torch.logsumexp(log_prob, dim=-1)
+        prob = torch.exp(-nll)
+        loss_reg = det_weight * nll[det_mask].mean() if det_mask.any() else 0.0
+        if (~det_mask).any():
+            loss_reg += nll[~det_mask].mean()
 
         loss = loss_reg + loss_cls
         if update_num % 5000 == 1:
             print(f"loss_reg: {loss_reg.item()} loss_cls: {loss_cls.item()}")
 
-        return loss, nll_loss, ntokens
+        return loss, nll_loss, ntokens, prob.mean()
 
     def compute_accuracy(self, model, net_output, sample):
         lprobs, target = self.get_lprobs_and_target(model, net_output, sample)
@@ -367,6 +377,9 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         metrics.log_scalar(
             "sample_size_v2", sample_size_v2, 1, round=3
         )
+
+        gt_prob_sum = sum(log.get("gt_prob", 0) for log in logging_outputs)
+        metrics.log_scalar("gt_prob", gt_prob_sum / sample_size, sample_size, round=6)
 
         total = utils.item(sum(log.get("total", 0) for log in logging_outputs))
         if total > 0:
