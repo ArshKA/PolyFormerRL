@@ -66,6 +66,10 @@ class RefcocoConfig(BaseConfig):
         },
     )
 
+    max_inference_len: int = field(
+        default=210, metadata={"help": "maximum number of inference steps"}
+    )
+
 
 @register_task("refcoco", dataclass=RefcocoConfig)
 class RefcocoTask(BaseTask):
@@ -167,7 +171,7 @@ class RefcocoTask(BaseTask):
             if isinstance(model, list):
                 model = model[0]
             min_len = 6
-            max_len = 210
+            max_len = self.cfg.max_inference_len
             model.eval()
             img = sample["net_input"]["patch_images"]
             b = img.shape[0]

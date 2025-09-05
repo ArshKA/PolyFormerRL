@@ -21,7 +21,7 @@ use_fp16 = True
 # Load pretrained ckpt & config
 overrides={"bpe_dir":"utils/BPE"}
 models, cfg, task = load_model_ensemble_and_task(
-        utils.split_paths('/data0/arshkon/checkpoints/polyform_rl/polyformer_l_refcocog.pt'),
+        utils.split_paths('/data0/arshkon/checkpoints/polyform_rl/polyformer_l_checkpoints/100_5e-5_512_fourier/checkpoint_epoch_24.pt'),
         arg_overrides=overrides
     )
 
@@ -228,7 +228,7 @@ def visual_grounding(image, text):
         if isinstance(models, list):
             model = models[0]
         min_len = 6
-        max_len = 210
+        max_len = getattr(cfg.task, 'max_inference_len', 210)
         model.eval()
         img = sample["net_input"]["patch_images"]
         b = img.shape[0]

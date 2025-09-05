@@ -1,5 +1,7 @@
 #!/usr/bin/env
 
+export NCCL_P2P_DISABLE=1
+
 # The port for communication. Note that if you want to run multiple tasks on the same machine,
 # you need to specify different port numbers.
 export MASTER_PORT=6061
