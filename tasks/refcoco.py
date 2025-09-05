@@ -65,6 +65,9 @@ class RefcocoConfig(BaseConfig):
             "help": 'generation args for Self-critical sequence training, as JSON string'
         },
     )
+    max_inference_len: int = field(
+        default=210, metadata={"help": "maximum number of inference steps"}
+    )
 
 
 @register_task("refcoco", dataclass=RefcocoConfig)
@@ -167,7 +170,7 @@ class RefcocoTask(BaseTask):
             if isinstance(model, list):
                 model = model[0]
             min_len = 6
-            max_len = 210
+            max_len = self.cfg.max_inference_len
             model.eval()
             img = sample["net_input"]["patch_images"]
             b = img.shape[0]
@@ -179,6 +182,8 @@ class RefcocoTask(BaseTask):
             delta_y1 = [[0] for _ in range(b)]
             delta_x2 = [[1] for _ in range(b)]
             delta_y2 = [[1] for _ in range(b)]
+
+            coords_hist = [[[0.0, 0.0]] for _ in range(b)]
 
             gen_out = [[] for _ in range(b)]
 
@@ -208,6 +213,11 @@ class RefcocoTask(BaseTask):
                 delta_y1_tensor = torch.tensor(np.array(delta_y1)).to(img.device)
                 delta_y2_tensor = torch.tensor(np.array(delta_y2)).to(img.device)
 
+                coordinates_tensor = None
+                use_fourier = getattr(getattr(model, 'decoder', None), 'fourier_projection', None) is not None
+                if use_fourier:
+                    coordinates_tensor = torch.tensor(np.array(coords_hist), dtype=torch.float32, device=img.device)
+
                 net_output = model.decoder(
                     prev_output_tokens_11_tensor,
                     prev_output_tokens_12_tensor,
@@ -223,7 +233,8 @@ class RefcocoTask(BaseTask):
                     alignment_layer=None,
                     alignment_heads=None,
                     src_lengths=sample['net_input']['src_lengths'],
-                    return_all_hiddens=False
+                    return_all_hiddens=False,
+                    coordinates=coordinates_tensor
                 )
 
                 cls_output = net_output[0]
@@ -256,6 +267,8 @@ class RefcocoTask(BaseTask):
                             delta_x = output_j_x - output_j_x_floor
                             delta_y = output_j_y - output_j_y_floor
 
+                            coords_hist[j].append([float(output_j_x), float(output_j_y)])
+
                         elif cls_j == SEP:
                             gen_out[j].append(2)  # insert 2 indicating separator tokens
                             prev_output_token_11[j].append(sep_index)
@@ -264,6 +277,7 @@ class RefcocoTask(BaseTask):
                             prev_output_token_22[j].append(sep_index)
                             delta_x = 0
                             delta_y = 0
+                            coords_hist[j].append([0.0, 0.0])
                         else:  # eos is predicted and i >= min_len
                             unfinish_flag[j] = 0
                             gen_out[j].append(-1)
@@ -273,6 +287,7 @@ class RefcocoTask(BaseTask):
                             prev_output_token_22[j].append(2)  # 2 is eos token
                             delta_x = 0
                             delta_y = 0
+                            coords_hist[j].append([0.0, 0.0])
                     else:  # prediction is finished
                         gen_out[j].append(-1)
                         prev_output_token_11[j].append(1)  # 1 is padding token
@@ -281,6 +296,7 @@ class RefcocoTask(BaseTask):
                         prev_output_token_22[j].append(1)
                         delta_x = 0
                         delta_y = 0
+                        coords_hist[j].append([0.0, 0.0])
                     delta_x1[j].append(delta_x)
                     delta_y1[j].append(delta_y)
                     delta_x2[j].append(1 - delta_x)

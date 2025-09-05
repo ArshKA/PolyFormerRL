@@ -93,6 +93,7 @@ class PolyFormerModel(TransformerModel):
         return_all_hiddens: bool = False,
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
+        coordinates: Optional[torch.Tensor] = None,
     ):
         if classification_head_name is not None:
             features_only = True
@@ -123,6 +124,7 @@ class PolyFormerModel(TransformerModel):
             alignment_heads=alignment_heads,
             src_lengths=src_lengths,
             return_all_hiddens=return_all_hiddens,
+            coordinates=coordinates,
         )
         return x_cls, x_reg, extra
 

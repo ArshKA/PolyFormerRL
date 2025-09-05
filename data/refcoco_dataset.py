@@ -251,6 +251,16 @@ class RefcocoDataset(BaseDataset):
 
         labels = np.stack([sample['label'] for sample in samples], 0)
         text = [s["text"] for s in samples]
+
+        max_seq_len = int(prev_output_tokens_11.size(1))
+        coordinates = torch.zeros(len(samples), max_seq_len, 2, dtype=torch.float32)
+        for i, s in enumerate(samples):
+            coords_src = s["target"].to(torch.float32)  # [Li, 2], aligned with tokens (no BOS)
+            tok_i = token_type[i]
+            for t in range(1, max_seq_len):
+                if (t - 1) >= 0 and (t - 1) < tok_i.size(0) and tok_i[t - 1].item() == 0 and (t - 1) < coords_src.size(0):
+                    coordinates[i, t] = coords_src[t - 1]
+
         batch = {
             "id": id,
             "nsentences": len(samples),
@@ -268,7 +278,8 @@ class RefcocoDataset(BaseDataset):
                 "delta_x1": delta_x1,
                 "delta_y1": delta_y1,
                 "delta_x2": delta_x2,
-                "delta_y2": delta_y2
+                "delta_y2": delta_y2,
+                "coordinates": coordinates,
             },
             "target": target,
             "w_resize_ratios": w_resize_ratios,

@@ -259,6 +259,10 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help='scale heads')
         parser.add_argument('--scale-resids', action='store_true',
                             help='scale resids')
+        parser.add_argument('--use-fourier-features', action='store_true',
+                            help='use Fourier features for coordinate encoding instead of bilinear interpolation')
+        parser.add_argument('--fourier-num-frequencies', type=int, default=10,
+                            help='number of frequencies for Fourier coordinate encoding')
         # fmt: on
 
     @classmethod
@@ -954,6 +958,14 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         self.embed_tokens = embed_tokens
 
+        # Fourier coordinate embedding
+        if getattr(args, 'use_fourier_features', False):
+            self.fourier_num_frequencies = getattr(args, 'fourier_num_frequencies', 10)
+            fourier_dim = 4 * self.fourier_num_frequencies  # 4 = 2 coords * 2 (sin,cos)
+            self.fourier_projection = nn.Linear(fourier_dim, embed_dim)
+        else:
+            self.fourier_projection = None
+
         self.embed_scale = 1.0 if args.no_scale_embedding else math.sqrt(embed_dim)
 
         if not args.adaptive_input and args.quant_noise_pq > 0:
@@ -1095,6 +1107,36 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         values = values.permute(2, 0, 1)
         return values
 
+    def fourier_encode_coordinates(self, coordinates):
+        """
+        Encode coordinates using Fourier/sinusoidal features
+        Args:
+            coordinates: [batch, seq_len, 2] tensor of (x, y) coordinates in [0, 1]
+        Returns:
+            [batch, seq_len, 4*num_frequencies] tensor of Fourier features
+        """
+        import torch
+        import math
+        
+        x, y = coordinates[..., 0], coordinates[..., 1]  # [batch, seq_len]
+        
+        encodings = []
+        for i in range(self.fourier_num_frequencies):
+            freq = 2.0 ** i
+            encodings.extend([
+                torch.sin(freq * math.pi * x),
+                torch.cos(freq * math.pi * x),
+                torch.sin(freq * math.pi * y),
+                torch.cos(freq * math.pi * y)
+            ])
+        
+        fourier_features = torch.stack(encodings, dim=-1)  # [batch, seq_len, 4*num_frequencies]
+        
+        if hasattr(self.fourier_projection, 'weight'):
+            fourier_features = fourier_features.to(dtype=self.fourier_projection.weight.dtype)
+        
+        return fourier_features
+
     def get_pos_info(self, tokens, tgt_pos_embed, src_pos_embed=None, use_image=False):
         batch_size = tokens.size(0)
         tgt_len = tokens.size(1)
@@ -1137,6 +1179,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         alignment_heads: Optional[int] = None,
         src_lengths: Optional[Any] = None,
         return_all_hiddens: bool = False,
+        coordinates: Optional[torch.Tensor] = None,
     ):
         """
         Args:
@@ -1172,6 +1215,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             full_context_alignment=full_context_alignment,
             alignment_layer=alignment_layer,
             alignment_heads=alignment_heads,
+            coordinates=coordinates,
         )
         x1 = x
         x2 = None
@@ -1195,6 +1239,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         full_context_alignment: bool = False,
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
+        coordinates: Optional[torch.Tensor] = None,
     ):
         return self.extract_features_scriptable(
             prev_output_tokens_11,
@@ -1211,6 +1256,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             full_context_alignment,
             alignment_layer,
             alignment_heads,
+            coordinates,
         )
 
     """
@@ -1235,6 +1281,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         full_context_alignment: bool = False,
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
+        coordinates: Optional[torch.Tensor] = None,
     ):
         """
         Similar to *forward* but only return features.
@@ -1299,17 +1346,22 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             tgt_pos_embed = tgt_pos_embed[:, -1:, :]
 
         # embed tokens and positions
-        token_embedding_11 = self.embed_tokens(prev_output_tokens_11)
-        token_embedding_12 = self.embed_tokens(prev_output_tokens_12)
-        token_embedding_21 = self.embed_tokens(prev_output_tokens_21)
-        token_embedding_22 = self.embed_tokens(prev_output_tokens_22)
-        delta_x1 = delta_x1.unsqueeze(-1).repeat(1, 1, token_embedding_11.shape[-1])
-        delta_x2 = delta_x2.unsqueeze(-1).repeat(1, 1, token_embedding_11.shape[-1])
-        delta_y1 = delta_y1.unsqueeze(-1).repeat(1, 1, token_embedding_11.shape[-1])
-        delta_y2 = delta_y2.unsqueeze(-1).repeat(1, 1, token_embedding_11.shape[-1])
+        if self.fourier_projection is not None and coordinates is not None:
+            print("USING FOURIER FEATURES")
+            fourier_features = self.fourier_encode_coordinates(coordinates)
+            token_embedding = self.fourier_projection(fourier_features)
+        else:
+            token_embedding_11 = self.embed_tokens(prev_output_tokens_11)
+            token_embedding_12 = self.embed_tokens(prev_output_tokens_12)
+            token_embedding_21 = self.embed_tokens(prev_output_tokens_21)
+            token_embedding_22 = self.embed_tokens(prev_output_tokens_22)
+            delta_x1 = delta_x1.unsqueeze(-1).repeat(1, 1, token_embedding_11.shape[-1])
+            delta_x2 = delta_x2.unsqueeze(-1).repeat(1, 1, token_embedding_11.shape[-1])
+            delta_y1 = delta_y1.unsqueeze(-1).repeat(1, 1, token_embedding_11.shape[-1])
+            delta_y2 = delta_y2.unsqueeze(-1).repeat(1, 1, token_embedding_11.shape[-1])
 
-        token_embedding = token_embedding_11*delta_x2*delta_y2 + token_embedding_12*delta_x2*delta_y1 + \
-                          token_embedding_21*delta_x1*delta_y2 + token_embedding_22*delta_x1*delta_y1
+            token_embedding = token_embedding_11*delta_x2*delta_y2 + token_embedding_12*delta_x2*delta_y1 + \
+                              token_embedding_21*delta_x1*delta_y2 + token_embedding_22*delta_x1*delta_y1
 
         x = self.embed_scale * token_embedding
 
@@ -1545,6 +1597,8 @@ def base_architecture(args):
     args.quant_noise_pq = getattr(args, "quant_noise_pq", 0)
     args.quant_noise_pq_block_size = getattr(args, "quant_noise_pq_block_size", 8)
     args.quant_noise_scalar = getattr(args, "quant_noise_scalar", 0)
+    args.use_fourier_features = getattr(args, "use_fourier_features", False)
+    args.fourier_num_frequencies = getattr(args, "fourier_num_frequencies", 10)
 
 
 

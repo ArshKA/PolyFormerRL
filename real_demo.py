@@ -1,5 +1,5 @@
 from PIL import Image
 from demo import visual_grounding
-img = Image.open("demo/vases.jpg")
-overlay, mask = visual_grounding(img, "the vase with the two white roses")
+img = Image.open("demo/dog.jpg")
+overlay, mask = visual_grounding(img, "the german shepard")
 Image.fromarray(overlay).save("out.png")

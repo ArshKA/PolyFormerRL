@@ -337,7 +337,7 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         sample_size_v2 = sum(log.get("sample_size_v2", 0) for log in logging_outputs)
 
         metrics.log_scalar(
-            "loss", loss_sum / sample_size, sample_size, round=3
+            "loss", loss_sum / sample_size, sample_size, round=6
         )
         metrics.log_scalar(
             "loss_v1", loss_sum_v1 / max(sample_size_v1, 1), max(sample_size_v1, 1), round=3

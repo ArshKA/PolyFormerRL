@@ -19,9 +19,12 @@ use_cuda = torch.cuda.is_available()
 use_fp16 = True
 
 # Load pretrained ckpt & config
-overrides={"bpe_dir":"utils/BPE"}
+# overrides={"bpe_dir":"utils/BPE", "max_inference_len": 100, "use_fourier_features": False}  # Set custom max inference length and Fourier flag
+
+overrides={"bpe_dir":"utils/BPE", "max_inference_len": 100, "use_fourier_features": True, "fourier_num_frequencies": 8}  # Set custom max inference length and Fourier flag
+
 models, cfg, task = load_model_ensemble_and_task(
-        utils.split_paths('/data0/arshkon/checkpoints/polyform_rl/polyformer_l_refcocog.pt'),
+        utils.split_paths('/data0/arshkon/checkpoints/polyform_rl/polyformer_l_checkpoints/100_5e-5_512_fourier/checkpoint_epoch_24.pt'),
         arg_overrides=overrides
     )
 
@@ -228,7 +231,7 @@ def visual_grounding(image, text):
         if isinstance(models, list):
             model = models[0]
         min_len = 6
-        max_len = 210
+        max_len = getattr(cfg.task, 'max_inference_len', 210)  # Use config value if available
         model.eval()
         img = sample["net_input"]["patch_images"]
         b = img.shape[0]
@@ -244,7 +247,12 @@ def visual_grounding(image, text):
         gen_out = [[] for _ in range(b)]
 
         n_bins = 64
+        use_fourier = getattr(model.decoder, 'fourier_projection', None) is not None
 
+        # Initialize coordinate history for Fourier mode
+        if use_fourier:
+            coord_history = [[[0.0, 0.0]] for _ in range(b)]  # Start with dummy coordinate
+        
         unfinish_flag = np.ones(b)
         i = 0
 
@@ -269,6 +277,17 @@ def visual_grounding(image, text):
             delta_y1_tensor = torch.tensor(np.array(delta_y1)).to(img.device)
             delta_y2_tensor = torch.tensor(np.array(delta_y2)).to(img.device)
 
+            # Prepare coordinates for Fourier mode
+            coordinates_tensor = None
+            if use_fourier:
+                # Convert coordinate history to tensor (do not overwrite decoding max_len)
+                coord_seq_len = max(len(coord_history[j]) for j in range(b))
+                coords = torch.zeros(b, coord_seq_len, 2).to(img.device)
+                for j in range(b):
+                    seq_len = len(coord_history[j])
+                    coords[j, :seq_len] = torch.tensor(coord_history[j])
+                coordinates_tensor = coords
+
             net_output = model.decoder(
                 prev_output_tokens_11_tensor,
                 prev_output_tokens_12_tensor,
@@ -284,7 +303,8 @@ def visual_grounding(image, text):
                 alignment_layer=None,
                 alignment_heads=None,
                 src_lengths=sample['net_input']['src_lengths'],
-                return_all_hiddens=False
+                return_all_hiddens=False,
+                coordinates=coordinates_tensor
             )
 
             cls_output = net_output[0]
@@ -309,24 +329,29 @@ def visual_grounding(image, text):
 
                         gen_out[j].extend([output_j_x, output_j_y])
 
-                        output_j_x = output_j_x * (n_bins - 1)
-                        output_j_y = output_j_y * (n_bins - 1)
+                        # Maintain coordinate history for Fourier
+                        if use_fourier:
+                            coord_history[j].append([output_j_x, output_j_y])
 
-                        output_j_x_floor = math.floor(output_j_x)
-                        output_j_y_floor = math.floor(output_j_y)
-                        output_j_x_ceil = math.ceil(output_j_x)
-                        output_j_y_ceil = math.ceil(output_j_y)
+                        # Quantize to bins to extend token sequences and compute deltas
+                        qx = output_j_x * (n_bins - 1)
+                        qy = output_j_y * (n_bins - 1)
+                        qx_floor = math.floor(qx)
+                        qy_floor = math.floor(qy)
+                        qx_ceil = math.ceil(qx)
+                        qy_ceil = math.ceil(qy)
 
-                        # convert to token
-                        prev_output_token_11[j].append(output_j_x_floor * n_bins + output_j_y_floor + 4)
-                        prev_output_token_12[j].append(output_j_x_floor * n_bins + output_j_y_ceil + 4)
-                        prev_output_token_21[j].append(output_j_x_ceil * n_bins + output_j_y_floor + 4)
-                        prev_output_token_22[j].append(output_j_x_ceil * n_bins + output_j_y_ceil + 4)
+                        prev_output_token_11[j].append(qx_floor * n_bins + qy_floor + 4)
+                        prev_output_token_12[j].append(qx_floor * n_bins + qy_ceil + 4)
+                        prev_output_token_21[j].append(qx_ceil * n_bins + qy_floor + 4)
+                        prev_output_token_22[j].append(qx_ceil * n_bins + qy_ceil + 4)
 
-                        delta_x = output_j_x - output_j_x_floor
-                        delta_y = output_j_y - output_j_y_floor
+                        delta_x = qx - qx_floor
+                        delta_y = qy - qy_floor
                     elif cls_j == 1:  # 1 for separator tokens
                         gen_out[j].append(2)  # insert 2 indicating separator tokens
+                        if use_fourier:
+                            coord_history[j].append([0.0, 0.0])  # Dummy separator coordinate
                         prev_output_token_11[j].append(3)
                         prev_output_token_12[j].append(3)
                         prev_output_token_21[j].append(3)
@@ -336,6 +361,8 @@ def visual_grounding(image, text):
                     else:  # eos is predicted and i >= min_len
                         unfinish_flag[j] = 0
                         gen_out[j].append(-1)
+                        if use_fourier:
+                            coord_history[j].append([0.0, 0.0])  # Dummy EOS coordinate
                         prev_output_token_11[j].append(2)  # 2 is eos token
                         prev_output_token_12[j].append(2)  # 2 is eos token
                         prev_output_token_21[j].append(2)  # 2 is eos token
@@ -344,6 +371,8 @@ def visual_grounding(image, text):
                         delta_y = 0
                 else:  # prediction is finished
                     gen_out[j].append(-1)
+                    if use_fourier:
+                        coord_history[j].append([0.0, 0.0])  # Dummy padding coordinate
                     prev_output_token_11[j].append(1)  # 1 is padding token
                     prev_output_token_12[j].append(1)
                     prev_output_token_21[j].append(1)

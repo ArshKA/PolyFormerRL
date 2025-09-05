@@ -1,5 +1,6 @@
 #!/usr/bin/env
 
+export NCCL_P2P_DISABLE=1
 # The port for communication. Note that if you want to run multiple tasks on the same machine,
 # you need to specify different port numbers.
 export MASTER_PORT=6061
@@ -17,7 +18,7 @@ user_dir=../../polyformer_module
 data_dir=/data0/arshkon/checkpoints/polyform_rl/datasets/finetune
 data=${data_dir}/refcoco+g_train_shuffled.tsv,${data_dir}/refcoco/refcoco_val.tsv
 selected_cols=0,5,6,2,4,3,7
-restore_file=/data0/arshkon/checkpoints/polyform_rl/polyformer_l_pretrain.pt
+restore_file=/data0/arshkon/checkpoints/polyform_rl/polyformer_l_refcocog.pt
 train_tsv=${data_dir}/refcoco+g_train_shuffled.tsv
 
 task=refcoco
@@ -48,8 +49,8 @@ for max_epoch in 100; do
     for patch_image_size in 512; do
       echo "patch_image_size "${patch_image_size}
 
-      log_file=${log_dir}/${max_epoch}"_"${lr}"_"${patch_image_size}".log"
-      save_path=${save_dir}/${max_epoch}"_"${lr}"_"${patch_image_size}
+      log_file=${log_dir}/${max_epoch}"_"${lr}"_"${patch_image_size}"_fourier.log"
+      save_path=${save_dir}/${max_epoch}"_"${lr}"_"${patch_image_size}"_fourier"
       mkdir -p $save_path
 
       # compute total updates and warmup-updates from warmup_ratio
@@ -115,6 +116,8 @@ PY
           --fp16-scale-window=512 \
           --det_weight=${det_weight} \
           --cls_weight=${cls_weight} \
+          --use-fourier-features \
+          --fourier-num-frequencies=8 \
           --num-workers=0 > ${log_file} 2>&1
     done
   done
