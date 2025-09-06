@@ -1406,7 +1406,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             w = F.softmax(w, dim=-1)
             B, T, _ = features.size()
             mu = torch.sigmoid(mu).view(B, T, K, 2)
-            sigma = F.softplus(log_sigma).view(B, T, K, 2) + 1e-6
+            sigma = F.softplus(log_sigma).view(B, T, K, 2)
+            sigma = sigma + 1e-2
             return self.cls_head(features), (w, mu, sigma)
         else:
             return features

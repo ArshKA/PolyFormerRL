@@ -127,7 +127,34 @@ class PolyFormerModel(TransformerModel):
         return x_cls, gmm_params, extra
 
     def upgrade_state_dict_named(self, state_dict, name):
-        pass
+        """
+        Make checkpoint loading robust to architecture changes.
+
+        If a parameter exists in both the checkpoint and current model but their
+        shapes differ (e.g., updated regression head for GMM components), drop
+        it from the incoming state_dict so the current model keeps its randomly
+        initialized weights for that parameter.
+        """
+        try:
+            current_state = self.state_dict()
+        except Exception:
+            # If for some reason state_dict cannot be retrieved, do nothing.
+            return
+
+        keys_to_delete = []
+        for key, tensor in state_dict.items():
+            if key in current_state:
+                current_tensor = current_state[key]
+                if current_tensor.shape != tensor.shape:
+                    logger.warning(
+                        f"Skipping load for parameter '{key}': checkpoint shape {tuple(tensor.shape)} != model shape {tuple(current_tensor.shape)}"
+                    )
+                    keys_to_delete.append(key)
+
+        for key in keys_to_delete:
+            del state_dict[key]
+
+        # No return needed; mutation in-place is sufficient for fairseq's loader
 
 
 @register_model_architecture("polyformer", "polyformer_l")

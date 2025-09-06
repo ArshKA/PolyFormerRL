@@ -9,9 +9,17 @@ export MASTER_PORT=6061
 det_weight=0.1
 cls_weight=0.0005
 num_bins=64
+num_mixtures=3
 log_dir=/data0/arshkon/checkpoints/polyform_rl/polyformer_l_logs
 save_dir=/data0/arshkon/checkpoints/polyform_rl/polyformer_l_checkpoints
 mkdir -p $log_dir $save_dir
+
+# GMM auxiliary loss settings (annealed away during finetuning)
+gmm_aux_init=1.0
+gmm_aux_start=0
+gmm_weight_coef=1e-3
+gmm_sep_coef=1e-3
+gmm_sep_margin=1.0
 
 bpe_dir=../../utils/BPE
 user_dir=../../polyformer_module
@@ -19,7 +27,7 @@ user_dir=../../polyformer_module
 data_dir=/data0/arshkon/checkpoints/polyform_rl/datasets/finetune
 data=${data_dir}/refcoco+g_train_shuffled.tsv,${data_dir}/refcoco/refcoco_val.tsv
 selected_cols=0,5,6,2,4,3,7
-restore_file=/data0/arshkon/checkpoints/polyform_rl/polyformer_l_pretrain.pt
+restore_file=/data0/arshkon/checkpoints/polyform_rl/polyformer_l_refcocog.pt
 train_tsv=${data_dir}/refcoco+g_train_shuffled.tsv
 
 task=refcoco
@@ -50,8 +58,8 @@ for max_epoch in 100; do
     for patch_image_size in 512; do
       echo "patch_image_size "${patch_image_size}
 
-      log_file=${log_dir}/${max_epoch}"_"${lr}"_"${patch_image_size}".log"
-      save_path=${save_dir}/${max_epoch}"_"${lr}"_"${patch_image_size}
+      log_file=${log_dir}/${max_epoch}"_"${lr}"_"${patch_image_size}"_3mixtures_aux.log"
+      save_path=${save_dir}/${max_epoch}"_"${lr}"_"${patch_image_size}"_3mixtures_aux"
       mkdir -p $save_path
 
       # compute total updates and warmup-updates from warmup_ratio
@@ -65,6 +73,9 @@ total = int(${total_num_update})
 print(int(ratio * total))
 PY
 )
+
+      # Anneal auxiliary GMM loss to 0 by ~half of training
+      gmm_aux_end=$(( total_num_update / 10 ))
 
       CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=${WORLD_SIZE} --master_port=${MASTER_PORT} --standalone ../../train.py \
           $data \
@@ -112,11 +123,18 @@ PY
           --scale-heads \
           --disable-entangle \
           --num-bins=${num_bins} \
+          --num-mixtures=${num_mixtures} \
           --patch-image-size=${patch_image_size} \
           --fp16 \
           --fp16-scale-window=512 \
           --det_weight=${det_weight} \
           --cls_weight=${cls_weight} \
+          --gmm-aux-init=${gmm_aux_init} \
+          --gmm-aux-start=${gmm_aux_start} \
+          --gmm-aux-end=${gmm_aux_end} \
+          --gmm-weight-coef=${gmm_weight_coef} \
+          --gmm-sep-coef=${gmm_sep_coef} \
+          --gmm-sep-margin=${gmm_sep_margin} \
           --num-workers=0 > ${log_file} 2>&1
     done
   done

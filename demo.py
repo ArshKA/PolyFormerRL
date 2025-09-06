@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 from fairseq import utils,tasks
 from utils.checkpoint_utils import load_model_ensemble_and_task
@@ -21,11 +22,13 @@ use_fp16 = True
 # Load pretrained ckpt & config
 overrides={"bpe_dir":"utils/BPE"}
 models, cfg, task = load_model_ensemble_and_task(
-        utils.split_paths('/data0/arshkon/checkpoints/polyform_rl/polyformer_l_checkpoints/100_5e-5_512_fourier/checkpoint_epoch_24.pt'),
+        utils.split_paths('/data0/arshkon/checkpoints/polyform_rl/polyformer_l_checkpoints/100_5e-5_512_3mixtures_aux/checkpoint_epoch_12.pt'),
         arg_overrides=overrides
     )
 
-cfg.common.seed = 7
+# cfg.common.seed = 7
+cfg.generation.temperature = 0.001
+cfg.generation.no_seed_provided = True
 cfg.generation.beam = 5
 cfg.generation.min_len = 12
 cfg.generation.max_len_a = 0
@@ -182,6 +185,42 @@ def overlay_davis(image, mask, colors=[[0, 0, 0], [255, 102, 102]], cscale=1, al
     return im_overlay.astype(image.dtype)
 
 
+def overlay_heatmap(image, heatmap, color=[102, 102, 255], alpha=0.35):
+    # Normalize heatmap to [0,1]
+    heat = heatmap.astype(np.float32)
+    heat = heat - heat.min()
+    max_val = heat.max()
+    if max_val > 0:
+        heat = heat / max_val
+    heat_resized = cv2.resize(heat, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+    color_arr = np.array(color, dtype=np.float32).reshape(1, 1, 3)
+    img_f32 = image.astype(np.float32)
+    heat_expanded = heat_resized[..., None]
+    blended = img_f32 * (1 - alpha * heat_expanded) + (alpha * heat_expanded) * color_arr
+    blended = np.clip(blended, 0, 255)
+    return blended.astype(image.dtype)
+
+
+def gmm_density_grid(mus, sigmas, weights, grid_size=64):
+    # mus: (K, 2) in [0,1], sigmas: (K, 2) > 0, weights: (K,)
+    xs = np.linspace(0.0, 1.0, grid_size, dtype=np.float32)
+    ys = np.linspace(0.0, 1.0, grid_size, dtype=np.float32)
+    X, Y = np.meshgrid(xs, ys)
+    density = np.zeros((grid_size, grid_size), dtype=np.float32)
+    two_pi = 2.0 * math.pi
+    for k in range(weights.shape[0]):
+        mux, muy = float(mus[k, 0]), float(mus[k, 1])
+        sigx, sigy = float(sigmas[k, 0]), float(sigmas[k, 1])
+        if sigx <= 0 or sigy <= 0:
+            continue
+        dx = (X - mux) / sigx
+        dy = (Y - muy) / sigy
+        gauss = np.exp(-0.5 * (dx * dx + dy * dy)) / (two_pi * sigx * sigy)
+        density += float(weights[k]) * gauss.astype(np.float32)
+    return density
+
+
 def draw_bbox(img, box, color=(0, 255, 0), thickness=2):
     x1, y1, x2, y2 = box
     return cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), color, thickness=thickness)
@@ -259,6 +298,7 @@ def visual_grounding(image, text):
             sample_patch_num=None
         )
         attn_masks = []
+        density_accum = None
         while i < max_len and unfinish_flag.any():
             prev_output_tokens_11_tensor = torch.tensor(np.array(prev_output_token_11)).to(img.device).long()
             prev_output_tokens_12_tensor = torch.tensor(np.array(prev_output_token_12)).to(img.device).long()
@@ -289,24 +329,44 @@ def visual_grounding(image, text):
 
             cls_output = net_output[0]
             cls_type = torch.argmax(cls_output, 2)
-            w, mu, sigma = net_output[1]
+            mixture_weights, mu, sigma = net_output[1]
+            print(mixture_weights[0, i].tolist(), mu[0, i].tolist(), sigma[0, i].tolist())
             attn = net_output[2]['attn']
             attn_arrays = [att.detach().cpu().numpy() for att in attn]
             attn_arrays = np.concatenate(attn_arrays, 0)
             attn_arrays = np.mean(attn_arrays, 0)
             attn_arrays = attn_arrays[i, :256].reshape(16, 16)
-            h, w = image.size
-            attn_mask = cv2.resize(attn_arrays.astype(np.float32), (h, w))
+            img_w, img_h = image.size
+            attn_mask = cv2.resize(attn_arrays.astype(np.float32), (img_w, img_h))
             attn_masks.append(attn_mask)
             
+            # Read temperature from config (ensure positive)
+            temperature = float(getattr(cfg.generation, 'temperature', 1.0))
+            if temperature <= 0.0:
+                temperature = 1e-8
+
             for j in range(b):
                 if unfinish_flag[j] == 1:  # prediction is not finished
                     cls_j = cls_type[j, i].item()
                     if cls_j == 0 or (cls_j == 2 and i < min_len):  # 0 for coordinate tokens; 2 for eos
-                        comp = w[j, i].argmax().item()
-                        output_j_x, output_j_y = mu[j, i, comp].cpu().numpy()
-                        output_j_x = min(output_j_x, 1)
-                        output_j_y = min(output_j_y, 1)
+                        # sample a component according to mixture weights and then sample a point from that Gaussian
+                        w_j = mixture_weights[j, i].float()
+                        if temperature != 1.0:
+                            w_j = F.softmax(torch.log(w_j + 1e-9) / temperature, dim=-1)
+                        comp = torch.multinomial(w_j, 1).item()
+                        # compute and accumulate density (use all components)
+                        if density_accum is None:
+                            density_accum = np.zeros((128, 128), dtype=np.float32)
+                        mus_np = mu[j, i].detach().cpu().numpy()  # (K,2)
+                        sig_np = (sigma[j, i] * temperature).detach().cpu().numpy()  # (K,2)
+                        w_np = w_j.detach().cpu().numpy()  # (K)
+                        density_accum += gmm_density_grid(mus_np, sig_np, w_np, grid_size=128)
+
+                        mu_ji = mu[j, i, comp].float()
+                        sigma_ji = (sigma[j, i, comp].float() * temperature).clamp_min(1e-6)
+                        sample_ji = torch.normal(mean=mu_ji, std=sigma_ji)
+                        sample_ji = torch.clamp(sample_ji, 0.0, 1.0)
+                        output_j_x, output_j_y = sample_ji.detach().cpu().tolist()
 
                         gen_out[j].extend([output_j_x, output_j_y])
 
@@ -368,9 +428,9 @@ def visual_grounding(image, text):
 
 
         gen_out_i_det = gen_out_i[:4]
-        w, h = image.size
-        gen_out_i_det[::2] *= w
-        gen_out_i_det[1::2] *= h
+        img_w, img_h = image.size
+        gen_out_i_det[::2] *= img_w
+        gen_out_i_det[1::2] *= img_h
 
         polygons_pred = gen_out_i[4:]
         polygons_pred = np.append(polygons_pred, [2])
@@ -378,8 +438,8 @@ def visual_grounding(image, text):
         idx_list = [idx for idx, val in
                     enumerate(polygons_pred) if val == 2]   # 2 indicates separator token
 
-        polygons_pred[::2] *= w
-        polygons_pred[1::2] *= h
+        polygons_pred[::2] *= img_w
+        polygons_pred[1::2] *= img_h
         if len(idx_list) > 0:   # multiple polygons
             polygons = []
             pred_idx = 0
@@ -398,8 +458,13 @@ def visual_grounding(image, text):
         hyps_det.append(gen_out_i_det)
         
 
-    pred_mask = get_mask_from_codes(hyps[0], (h, w))
+    pred_mask = get_mask_from_codes(hyps[0], (img_h, img_w))
     pred_overlayed = overlay_predictions(np.asarray(image), pred_mask, hyps[0], hyps_det[0])
+    # overlay density if available
+    if density_accum is not None:
+        density_accum = np.clip(density_accum, 0, 200)
+        density_accum = (density_accum - density_accum.mean()) / (density_accum.std() + 1e-6)
+        pred_overlayed = overlay_heatmap(pred_overlayed, (density_accum+.0001-np.min(density_accum)), color=[102, 102, 255], alpha=.7)
 
     return pred_overlayed, np.array(pred_mask*255, dtype=np.uint8)
 

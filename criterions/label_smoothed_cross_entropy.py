@@ -70,6 +70,31 @@ class AdjustLabelSmoothedCrossEntropyCriterionConfig(FairseqDataclass):
         default=None,
         metadata={"help": "constraint range"}
     )
+    # Auxiliary GMM loss controls
+    gmm_aux_init: float = field(
+        default=0.0,
+        metadata={"help": "initial coefficient for auxiliary GMM loss (0 to disable)"}
+    )
+    gmm_aux_start: int = field(
+        default=0,
+        metadata={"help": "update step to start annealing auxiliary GMM loss"}
+    )
+    gmm_aux_end: int = field(
+        default=50000,
+        metadata={"help": "update step to finish annealing auxiliary GMM loss (0 -> immediate off)"}
+    )
+    gmm_weight_coef: float = field(
+        default=1e-3,
+        metadata={"help": "coefficient for weight-uniformity term (KL to uniform)"}
+    )
+    gmm_sep_coef: float = field(
+        default=1e-3,
+        metadata={"help": "coefficient for mean-separation term"}
+    )
+    gmm_sep_margin: float = field(
+        default=1.0,
+        metadata={"help": "hinge margin for normalized mean separation"}
+    )
 
 
 def construct_rdrop_sample(x):
@@ -92,6 +117,84 @@ def kl_loss(p, q):
     q_loss = F.kl_div(q, torch.exp(p), reduction='sum')
     loss = (p_loss + q_loss) / 2
     return loss
+
+
+def _linear_anneal_coeff(update_num: int, start_step: int, end_step: int, init_coeff: float) -> float:
+    if init_coeff <= 0.0:
+        return 0.0
+    if end_step <= start_step:
+        return 0.0
+    if update_num <= start_step:
+        return float(init_coeff)
+    if update_num >= end_step:
+        return 0.0
+    ratio = (update_num - start_step) / float(end_step - start_step)
+    return float(init_coeff) * (1.0 - ratio)
+
+
+@torch.no_grad()
+def _safe_mean(t: torch.Tensor) -> torch.Tensor:
+    if t.numel() == 0:
+        return torch.tensor(0.0, device=t.device, dtype=t.dtype)
+    return t.mean()
+
+
+def compute_gmm_aux_loss(
+        w: torch.Tensor,
+        mu: torch.Tensor,
+        sigma: torch.Tensor,
+        sep_margin: float = 1.0,
+        weight_coef: float = 1e-3,
+        sep_coef: float = 1e-3,
+        eps: float = 1e-8,
+):
+    """Compute auxiliary GMM loss encouraging uniform weights and separated means.
+
+    Args:
+        w: shape [N, K]
+        mu: shape [N, K, D]
+        sigma: shape [N, K, D]
+    Returns:
+        aux_loss: scalar tensor
+        weight_kl: scalar tensor (KL(w || Uniform))
+        sep_loss: scalar tensor
+    """
+    if w.numel() == 0:
+        device = mu.device if mu.is_cuda or mu.device.type != 'cpu' else w.device
+        zero = torch.tensor(0.0, device=device)
+        return zero, zero, zero
+
+    # Ensure float32 for numeric stability
+    w_f = w.float()
+    mu_f = mu.float()
+    sigma_f = sigma.float()
+
+    # KL to uniform for weights
+    K = w_f.size(-1)
+    logK = math.log(K)
+    weight_kl_per = (w_f * (torch.log(w_f.clamp_min(eps)) + logK)).sum(dim=-1)
+    weight_kl = weight_kl_per.mean()
+
+    # Hinge repulsion on means with variance normalization
+    # pairwise normalized squared distances between component means
+    # Shapes: [N, K, 1, D] - [N, 1, K, D] -> [N, K, K, D]
+    diff = mu_f[:, :, None, :] - mu_f[:, None, :, :]
+    var_sum = sigma_f[:, :, None, :].pow(2) + sigma_f[:, None, :, :].pow(2) + eps
+    d2 = (diff.pow(2) / var_sum).sum(dim=-1)  # [N, K, K]
+
+    # Use only i<j pairs
+    K_idx = d2.size(-1)
+    if K_idx >= 2:
+        tri_mask = torch.triu(torch.ones((K_idx, K_idx), dtype=torch.bool, device=d2.device), diagonal=1)
+        d2_pairs = d2[:, tri_mask]
+        d_pairs = torch.sqrt(d2_pairs + eps)
+        sep_per = F.relu(sep_margin - d_pairs).pow(2)
+        sep_loss = sep_per.mean()
+    else:
+        sep_loss = torch.tensor(0.0, device=d2.device)
+
+    aux_loss = weight_coef * weight_kl + sep_coef * sep_loss
+    return aux_loss, weight_kl, sep_loss
 
 
 def label_smoothed_nll_loss(
@@ -161,7 +264,13 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             sample_patch_num=196,
             constraint_range=None,
             det_weight=1.0,
-            cls_weight=1.0
+            cls_weight=1.0,
+            gmm_aux_init=0.0,
+            gmm_aux_start=0,
+            gmm_aux_end=50000,
+            gmm_weight_coef=1e-3,
+            gmm_sep_coef=1e-3,
+            gmm_sep_margin=1.0
     ):
         super().__init__(task)
         self.sentence_avg = sentence_avg
@@ -184,6 +293,14 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             constraint_start, constraint_end = constraint_range.split(',')
             self.constraint_start = int(constraint_start)
             self.constraint_end = int(constraint_end)
+
+        # Aux GMM loss settings
+        self.gmm_aux_init = gmm_aux_init
+        self.gmm_aux_start = gmm_aux_start
+        self.gmm_aux_end = gmm_aux_end
+        self.gmm_weight_coef = gmm_weight_coef
+        self.gmm_sep_coef = gmm_sep_coef
+        self.gmm_sep_margin = gmm_sep_margin
 
     def forward(self, model, sample, update_num=0, reduce=True):
         """Compute the loss for the given sample.
@@ -219,7 +336,7 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             construct_rdrop_sample(sample)
 
         net_output = model(**sample["net_input"])
-        loss, nll_loss, ntokens, gt_prob = self.compute_loss(
+        loss, nll_loss, ntokens, gt_prob, gmm_aux, gmm_w_kl, gmm_sep, gmm_aux_coeff = self.compute_loss(
             model, net_output, sample, update_num, det_weight=self.det_weight,
             cls_weight=self.cls_weight, reduce=reduce
         )
@@ -233,6 +350,10 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             "nsentences": sample["nsentences"],
             "sample_size": sample_size,
             "gt_prob": gt_prob.data,
+            "gmm_aux": gmm_aux.data if isinstance(gmm_aux, torch.Tensor) else torch.tensor(gmm_aux),
+            "gmm_w_kl": gmm_w_kl.data if isinstance(gmm_w_kl, torch.Tensor) else torch.tensor(gmm_w_kl),
+            "gmm_sep": gmm_sep.data if isinstance(gmm_sep, torch.Tensor) else torch.tensor(gmm_sep),
+            "gmm_aux_coeff": torch.tensor(gmm_aux_coeff),
         }
         if self.report_accuracy:
             n_correct, total = self.compute_accuracy(model, net_output, sample)
@@ -309,20 +430,43 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         mu = mu[mask]
         sigma = sigma[mask]
 
-        diff = (target.unsqueeze(1) - mu) / sigma
-        log_gauss = -0.5 * diff.pow(2).sum(-1) - torch.log(2 * math.pi * sigma.prod(-1))
-        log_prob = torch.log(w + 1e-9) + log_gauss
-        nll = -torch.logsumexp(log_prob, dim=-1)
+        # Compute GMM likelihood in float32 for numerical stability, and sum logs instead of log of product
+        with torch.cuda.amp.autocast(enabled=False):
+            target_f = target.float()
+            mu_f = mu.float()
+            sigma_f = sigma.float()
+            w_f = w.float()
+            diff = (target_f.unsqueeze(1) - mu_f) / sigma_f
+            quad = 0.5 * diff.pow(2).sum(-1)
+            log_sigma_sum = torch.log(sigma_f).sum(-1)
+            log_gauss = -quad - log_sigma_sum - math.log(2 * math.pi)
+            log_prob = torch.log(w_f + 1e-9) + log_gauss
+            nll = -torch.logsumexp(log_prob, dim=-1)
         prob = torch.exp(-nll)
         loss_reg = det_weight * nll[det_mask].mean() if det_mask.any() else 0.0
         if (~det_mask).any():
             loss_reg += nll[~det_mask].mean()
 
-        loss = loss_reg + loss_cls
+        # Auxiliary GMM loss with annealing
+        aux_coeff = _linear_anneal_coeff(update_num, self.gmm_aux_start, self.gmm_aux_end, self.gmm_aux_init)
+        if aux_coeff > 0.0 and w.numel() > 0:
+            with torch.cuda.amp.autocast(enabled=False):
+                gmm_aux_loss, gmm_w_kl, gmm_sep = compute_gmm_aux_loss(
+                    w, mu, sigma,
+                    sep_margin=self.gmm_sep_margin,
+                    weight_coef=self.gmm_weight_coef,
+                    sep_coef=self.gmm_sep_coef,
+                )
+            loss = loss_reg + loss_cls + aux_coeff * gmm_aux_loss
+        else:
+            gmm_aux_loss = torch.tensor(0.0, device=lprobs.device)
+            gmm_w_kl = torch.tensor(0.0, device=lprobs.device)
+            gmm_sep = torch.tensor(0.0, device=lprobs.device)
+            loss = loss_reg + loss_cls
         if update_num % 5000 == 1:
-            print(f"loss_reg: {loss_reg.item()} loss_cls: {loss_cls.item()}")
+            print(f"loss_reg: {loss_reg.item()} loss_cls: {loss_cls.item()} gmm_aux: {gmm_aux_loss.item()} coeff: {aux_coeff}")
 
-        return loss, nll_loss, ntokens, prob.mean()
+        return loss, nll_loss, ntokens, prob.mean(), gmm_aux_loss, gmm_w_kl, gmm_sep, aux_coeff
 
     def compute_accuracy(self, model, net_output, sample):
         lprobs, target = self.get_lprobs_and_target(model, net_output, sample)
@@ -380,6 +524,16 @@ class AdjustLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
 
         gt_prob_sum = sum(log.get("gt_prob", 0) for log in logging_outputs)
         metrics.log_scalar("gt_prob", gt_prob_sum / sample_size, sample_size, round=6)
+
+        # Auxiliary GMM metrics
+        gmm_aux_sum = sum(log.get("gmm_aux", 0) for log in logging_outputs)
+        gmm_w_kl_sum = sum(log.get("gmm_w_kl", 0) for log in logging_outputs)
+        gmm_sep_sum = sum(log.get("gmm_sep", 0) for log in logging_outputs)
+        gmm_aux_coeff_sum = sum(log.get("gmm_aux_coeff", 0) for log in logging_outputs)
+        metrics.log_scalar("gmm_aux", gmm_aux_sum / max(sample_size, 1), max(sample_size, 1), round=6)
+        metrics.log_scalar("gmm_w_kl", gmm_w_kl_sum / max(sample_size, 1), max(sample_size, 1), round=6)
+        metrics.log_scalar("gmm_sep", gmm_sep_sum / max(sample_size, 1), max(sample_size, 1), round=6)
+        metrics.log_scalar("gmm_aux_coeff", gmm_aux_coeff_sum / max(sample_size, 1), max(sample_size, 1), round=6)
 
         total = utils.item(sum(log.get("total", 0) for log in logging_outputs))
         if total > 0:
