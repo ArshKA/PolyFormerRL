@@ -250,9 +250,9 @@ class RefcocoTask(BaseTask):
                             if temp != 1.0:
                                 w_j = F.softmax(torch.log(w_j + 1e-9) / temp, dim=-1)
                             comp = torch.multinomial(w_j, 1).item()
-                            sample = torch.normal(mu[j, i, comp], sigma[j, i, comp] * temp)
-                            sample = sample.clamp(0, 1)
-                            output_j_x, output_j_y = sample.cpu().numpy()
+                            coord_sample = torch.normal(mu[j, i, comp], sigma[j, i, comp] * temp)
+                            coord_sample = coord_sample.clamp(0, 1)
+                            output_j_x, output_j_y = coord_sample.cpu().numpy()
 
                             gen_out[j].extend([output_j_x, output_j_y])
 
