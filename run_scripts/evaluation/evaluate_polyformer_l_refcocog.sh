@@ -4,8 +4,8 @@ export NCCL_P2P_DISABLE=1
 # The port for communication. Note that if you want to run multiple tasks on the same machine,
 # you need to specify different port numbers.
 export MASTER_PORT=6092
-export CUDA_VISIBLE_DEVICES=8
-WORLD_SIZE=1
+export CUDA_VISIBLE_DEVICES=6,7,8,9
+WORLD_SIZE=4
 
 
 ########################## Evaluate Refcocog ##########################
@@ -14,12 +14,12 @@ bpe_dir=../../utils/BPE
 selected_cols=0,5,6,2,4,3
 
 
-model='polyformer_l_3mixtures_aux_18'
+model='polyformer_l_3mixtures_aux_3s_e9_20e'
 num_bins=64
-batch_size=32
+batch_size=64
 
 dataset='refcocog'
-ckpt_path=/data0/arshkon/checkpoints/polyform_rl/polyformer_l_checkpoints/100_5e-5_512_3mixtures_aux/checkpoint_epoch_18.pt
+ckpt_path=/data0/arshkon/checkpoints/polyform_rl/polyformer_l_checkpoints/20_5e-5_512_3mixtures_aux_3s/checkpoint_last.pt
 
 for split in 'refcocog_val'
 do

@@ -242,6 +242,9 @@ class RefcocoTask(BaseTask):
                 cls_type = torch.argmax(cls_output, 2)
                 w, mu, sigma = net_output[1]
                 temp = self.cfg.sample_temperature
+                if temp <= 0.0:
+                    temp = 1e-8
+                sqrt_temp = math.sqrt(temp)
                 for j in range(b):
                     if unfinish_flag[j] == 1:  # prediction is not finished
                         cls_j = cls_type[j, i].item()
@@ -250,7 +253,9 @@ class RefcocoTask(BaseTask):
                             if temp != 1.0:
                                 w_j = F.softmax(torch.log(w_j + 1e-9) / temp, dim=-1)
                             comp = torch.multinomial(w_j, 1).item()
-                            coord_sample = torch.normal(mu[j, i, comp], sigma[j, i, comp] * temp)
+                            # Apply sigma floor and sqrt-temperature scaling
+                            sigma_scaled = sigma[j, i, comp].float().clamp_min(1e-6) * sqrt_temp
+                            coord_sample = torch.normal(mu[j, i, comp], sigma_scaled)
                             coord_sample = coord_sample.clamp(0, 1)
                             output_j_x, output_j_y = coord_sample.cpu().numpy()
 
